@@ -82,7 +82,7 @@ form_str <- paste0(form_start, campshare, ",", campshare_comp, form_end, "~", fo
 form_ei <- as.formula(form_str)
 
 # NOTE: adjust parameters sample, thin, burnin to run longer (or shorter) chain
-ei_bayes <- ei.MD.bayes(form_ei, data=df, total=votesum)
+ei_bayes <- ei.MD.bayes(form_ei, data=df, total=votesum, thin=40, sample=20000, burnin=800000)
 cellcounts <- summary(ei_bayes)$draws$Cell.counts
 
 totalcount_ingrp <- cellcounts[1,1] + cellcounts[3,1]
