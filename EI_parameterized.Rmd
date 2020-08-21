@@ -1,0 +1,171 @@
+---
+title: "`r params$title`, `r params$election`"
+output: html_document
+params:
+  title: "ER & EI Results"
+  path: "OR_precincts.shp"
+  county: "ALL"
+  vap: "VAP"
+  my_dem: c("BVAP")
+  election: "PRES16"
+  parties: c('PRES16D', 'PRES16R')
+  campaign: 'GOV18D'
+
+---
+
+```{r , include=FALSE}
+
+# renaming params as variables to simplify code later on
+
+path = params$path
+county = params$county
+vap = params$vap
+my_dem = params$my_dem
+election = params$election
+parties = params$parties
+campaign = params$campaign
+
+```
+
+``` {r preprocessing, include=FALSE}
+  
+df<-st_read(path)
+# coerce into data.frame type since geometry attribute is not particularly useful
+class(df) <- 'data.frame'
+
+
+
+# keep only the rows for our county
+if (county != "ALL") {
+  df <- filter(df, County==county)
+}
+
+# calculate total votes election by adding votes of all `parties`
+# format: total votes for GOV18 election is given as S_GOV18
+votesum <- paste0("S_", election) 
+df[votesum] <- rowSums(select(df, all_of(parties)))
+
+# calculate vote share of our given campaign
+
+# format: vote share for GOV18 democratic campaign given as P_GOV18D
+campshare <- paste(c("P", campaign), collapse="_")
+# format: vote share for the opponent campaign given as Pnot_GOV18D
+campshare_comp <- paste(c("Pnot", campaign), collapse="_")
+df[campshare] <- df[campaign] / df[votesum]
+df[campshare_comp] <- 1 - df[campshare]
+
+# calculate voter share of our demographic
+
+# format: voter share from HVAP is given as P_HVAP
+# format: for HVAP + BVAP coalition, is given as P_HVAP_BVAP
+demshare <- paste(c("P", my_dem), collapse="_")
+# format: voter share from all voters not in HVAP is given as Pnot_HVAP
+demshare_comp <- paste(c("Pnot", my_dem), collapse="_")
+df[demshare] <- rowSums(df[my_dem]) / df[vap]
+df[demshare_comp] <- 1 - df[demshare]
+
+
+# remove precincts where there was division errors resulting in NaN due to 
+# zero turn out from given demographics or for given elections
+df = df[complete.cases(df[c(campshare, campshare_comp, demshare, demshare_comp)]), ]
+
+
+```
+
+```{r modeling, include=FALSE}
+
+# ecological inference
+
+form_start <- paste("cbind(")
+form_end <- paste(")")
+form_str <- paste0(form_start, campshare, ",", campshare_comp, form_end, "~", form_start, demshare, ",", demshare_comp,  form_end)
+form_ei <- as.formula(form_str)
+
+# NOTE: adjust parameters sample, thin, burnin to run longer (or shorter) chain
+ei_bayes <- ei.MD.bayes(form_ei, data=df, total=votesum)
+cellcounts <- summary(ei_bayes)$draws$Cell.counts
+
+totalcount_ingrp <- cellcounts[1,1] + cellcounts[3,1]
+totalcount_outgrp <- cellcounts[2,1] + cellcounts[4,1]
+
+ei_ingrp <- cellcounts[1,1] / totalcount_ingrp
+ei_ingrp_l <- cellcounts[1,3] / totalcount_ingrp
+ei_ingrp_h <- cellcounts[1,4] / totalcount_ingrp
+
+ei_outgrp <- cellcounts[2,1] / totalcount_outgrp
+ei_outgrp_l <- cellcounts[2,3] / totalcount_outgrp
+ei_outgrp_h <- cellcounts[2,4] / totalcount_outgrp
+
+ei_results <- rbind(c(ei_ingrp, ei_ingrp_l, ei_ingrp_h),
+                    c(ei_outgrp, ei_outgrp_l, ei_outgrp_h))
+
+colnames(ei_results) <- c("fit", "lwr", "upr")
+
+# ecological regression
+
+form_str <- paste0(campshare, "~", demshare)
+form_er <- as.formula(form_str)
+er_model <- lm(form_er, data=df)
+
+# predict for a precinct of 100% vote share for our dem or 0% 
+pct <- data.frame(
+  c(1, 0)
+)
+colnames(pct) <- demshare
+
+er_results <- predict(er_model, newdata = pct, interval = "confidence")
+
+```
+
+# Inputs
+
+County: `r county` \
+
+Demographics (In-Group): `r paste(my_dem, collapse="+")` \
+
+Election: `r election` \
+
+Campaign: `r campaign` \
+
+
+# Results
+
+```{r result table, results = "asis", echo = FALSE }
+
+ei_table <- rbind(ei_results, er_results)
+
+rownames(ei_table) <- c("EI In-Group", "EI Out-Group", "ER In-Group", "ER Out-Group")
+colnames(ei_table) <- c("Point Estimate", "2.5%", "97.5%")
+
+kable(ei_table, digits = 2, caption=paste0("Campaign: ", campaign, ", County: ", county)) %>%
+  kable_styling(full_width = FALSE)
+
+```
+
+```{r ei plot, echo = FALSE, message = FALSE}
+
+d <- as.data.frame(ei_results)
+d$label <- c("In-Group", "Out-Group")
+
+p1 <- ggplot(data=d, aes(x=label, y=fit, ymin=lwr, ymax=upr)) +
+  geom_pointrange() + 
+  xlab("") + 
+  ylab(paste0("Vote share for ", campaign)) +
+  theme_bw()
+print(p1)
+
+```
+
+```{r er plot, echo = FALSE, message = FALSE}
+
+p2 <- ggplot(df, aes_string(demshare, campshare)) +
+  geom_point() + 
+  geom_smooth(method = "lm", fullrange = TRUE) +
+  scale_x_continuous(expand=c(0,0), limits=c(0,1)) +
+  scale_y_continuous(expand=c(0,0), limits=c(-1.5,1.5)) +
+  coord_cartesian(xlim=c(0,1), ylim=c(0,1)) +
+  ggtitle(paste0("Ecological Regression for ", county)) +
+  theme_bw()
+print(p2)
+
+```
